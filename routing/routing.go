@@ -25,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
+	"log"
 )
 
 // Pulled from http://man7.org/linux/man-pages/man7/rtnetlink.7.html
@@ -67,6 +68,7 @@ func (r routeSlice) Swap(i, j int) {
 
 type router struct {
 	ifaces []net.Interface
+	ifindex [256]int
 	addrs  []ipAddrs
 	v4, v6 routeSlice
 }
@@ -93,6 +95,7 @@ func (r *router) Route(dst net.IP) (iface *net.Interface, gateway, preferredSrc 
 
 func (r *router) RouteWithSrc(input net.HardwareAddr, src, dst net.IP) (iface *net.Interface, gateway, preferredSrc net.IP, err error) {
 	var ifaceIndex int
+	var index int
 	switch {
 	case dst.To4() != nil:
 		ifaceIndex, gateway, preferredSrc, err = r.route(r.v4, input, src, dst)
@@ -102,17 +105,15 @@ func (r *router) RouteWithSrc(input net.HardwareAddr, src, dst net.IP) (iface *n
 		err = errors.New("IP is not valid as IPv4 or IPv6")
 		return
 	}
-
-	// Interfaces are 1-indexed, but we store them in a 0-indexed array.
-	ifaceIndex--
-
-	iface = &r.ifaces[ifaceIndex]
+	// Interfaces are 1-indexed with gaps allowed, but we store them in a 0-indexed array.
+	index=r.ifindex[ifaceIndex]
+	iface = &r.ifaces[index]
 	if preferredSrc == nil {
 		switch {
 		case dst.To4() != nil:
-			preferredSrc = r.addrs[ifaceIndex].v4
+			preferredSrc = r.addrs[index].v4
 		case dst.To16() != nil:
-			preferredSrc = r.addrs[ifaceIndex].v6
+			preferredSrc = r.addrs[index].v6
 		}
 	}
 	return
@@ -136,10 +137,20 @@ func (r *router) route(routes routeSlice, input net.HardwareAddr, src, dst net.I
 		if rt.Src != nil && !rt.Src.Contains(src) {
 			continue
 		}
-		if rt.Dst != nil && !rt.Dst.Contains(dst) {
+		if rt.Dst == nil {
 			continue
 		}
+		if !rt.Dst.Contains(dst) {
+			continue
+		}
+		log.Printf("Found non-default route to i%v via ifnum %v", dst, rt.OutputIface)
 		return int(rt.OutputIface), rt.Gateway, rt.PrefSrc, nil
+	}
+	for _, rt := range routes {
+		if rt.Dst == nil {
+			log.Printf("Found default route to %v via ifnum %v", dst, rt.OutputIface)
+			return int(rt.OutputIface), rt.Gateway, rt.PrefSrc, nil
+		}
 	}
 	err = fmt.Errorf("no route found for %v", dst)
 	return
@@ -212,10 +223,9 @@ loop:
 		return nil, err
 	}
 	for i, iface := range ifaces {
-		if i != iface.Index-1 {
-			return nil, fmt.Errorf("out of order iface %d = %v", i, iface)
-		}
 		rtr.ifaces = append(rtr.ifaces, iface)
+		// keep the index separate, as there can be holes (also 1 based)
+		rtr.ifindex[iface.Index] = i
 		var addrs ipAddrs
 		ifaceAddrs, err := iface.Addrs()
 		if err != nil {
