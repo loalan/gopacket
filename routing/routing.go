@@ -68,9 +68,9 @@ func (r routeSlice) Swap(i, j int) {
 
 type router struct {
 	ifaces []net.Interface
-	ifindex [256]int
 	addrs  []ipAddrs
 	v4, v6 routeSlice
+	ifindex map[int]int
 }
 
 func (r *router) String() string {
@@ -170,6 +170,7 @@ func New() (Router, error) {
 	if err != nil {
 		return nil, err
 	}
+	rtr.ifindex=make(map[int]int)
 loop:
 	for _, m := range msgs {
 		switch m.Header.Type {
